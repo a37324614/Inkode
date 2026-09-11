@@ -73,7 +73,25 @@ jobs:
           # 保存写回
           $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $targetProductPath -Encoding utf8NoBOM
           Write-Host "product.json 更新完成！"
+# 修复/转换合法标准 ICO 格式
+      - name: Validate and Fix ICO Format
+        run: |
+          python -m pip install --upgrade pillow
+          python -c @"
+          from PIL import Image
+          import sys
 
+          # 打开现有的 icon.ico (即便它是伪装成 .ico 的 png/jpg 也能正常读取)
+          img = Image.open('icon.ico')
+          img = img.convert('RGBA')
+
+          # 写入真正合法的 Windows ICO 多分辨率复合格式
+          sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+          img.save('icon_valid.ico', format='ICO', sizes=sizes)
+          print('ICO converted successfully!')
+          "@
+          # 覆盖原图标文件
+          Move-Item -Path "icon_valid.ico" -Destination "icon.ico" -Force
       # 4. 开启便携模式：注入插件与用户配置 (合并修正版)
       - name: Inject Portable Data, Extensions & Settings
         run: |
