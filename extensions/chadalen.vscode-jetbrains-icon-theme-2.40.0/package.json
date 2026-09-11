@@ -1,0 +1,84 @@
+{
+	"name": "vscode-jetbrains-icon-theme",
+	"private": true,
+	"version": "2.40.0",
+	"displayName": "JetBrains Icon Theme",
+	"description": "JetBrains Icon Theme for VSCode",
+	"publisher": "chadalen",
+	"author": {
+		"name": "Chad Adams",
+		"email": "cadamsdev@outlook.com",
+		"url": "https://cadamsdev.com"
+	},
+	"scripts": {
+		"prebuild": "tsx ./scripts/build/build.ts",
+		"package": "vsce package",
+		"lazy-release": "lazy-release"
+	},
+	"license": "MIT",
+	"icon": "logo.png",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/cadamsdev/vscode-jetbrains-icon-theme"
+	},
+	"engines": {
+		"vscode": "^1.104.1"
+	},
+	"categories": [
+		"Themes"
+	],
+	"extensionKind": [
+		"ui",
+		"workspace"
+	],
+	"keywords": [
+		"jetbrains",
+		"icons",
+		"icon-theme",
+		"theme",
+		"intellij",
+		"webstorm",
+		"idea"
+	],
+	"bugs": {
+		"url": "https://github.com/cadamsdev/vscode-jetbrains-icon-theme/issues"
+	},
+	"contributes": {
+		"iconThemes": [
+			{
+				"id": "vscode-jetbrains-icon-theme",
+				"label": "JetBrains Icon Theme v1 Dark",
+				"path": "./dist/v1/dark/theme.json"
+			},
+			{
+				"id": "vscode-jetbrains-icon-theme-2023-light",
+				"label": "JetBrains Icon Theme 2023+ UI Light",
+				"path": "./dist/2023/light/theme.json"
+			},
+			{
+				"id": "vscode-jetbrains-icon-theme-2023-dark",
+				"label": "JetBrains Icon Theme 2023+ UI Dark",
+				"path": "./dist/2023/dark/theme.json"
+			},
+			{
+				"id": "vscode-jetbrains-icon-theme-2023-auto",
+				"label": "JetBrains Icon Theme 2023+ UI Auto",
+				"path": "./dist/2023/auto/theme.json"
+			}
+		]
+	},
+	"devDependencies": {
+		"@actions/core": "^1.11.1",
+		"@lazy-release/cli": "^0.2.2",
+		"@types/node": "^22.18.6",
+		"@vscode/vsce": "^3.6.1",
+		"svgson": "^5.3.1",
+		"tsx": "^4.20.5",
+		"typescript": "^5.9.2"
+	},
+	"__metadata": {
+		"installedTimestamp": 1786501886122,
+		"targetPlatform": "undefined",
+		"size": 842540
+	}
+}

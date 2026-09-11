@@ -1,0 +1,12 @@
+{
+  "nameShort": "Inkode",
+  "nameLong": "墨码 Inkode",
+  "applicationName": "inkode",
+  "dataFolderName": ".inkode",
+  "win32AppId": "{A7F23C91-6B48-4D05-9E32-8C1F54B760AD}",
+  "urlProtocol": "inkode",
+  "extensionsGallery": {
+    "serviceUrl": "https://open-vsx.org/vscode/gallery",
+    "itemUrl": "https://open-vsx.org/vscode/item"
+  }
+}

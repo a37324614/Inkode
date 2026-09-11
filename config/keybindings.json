@@ -1,0 +1,31 @@
+// 将键绑定放在此文件中以覆盖默认值
+[
+  {
+    "key": "ctrl+1",
+    "command": "editor.action.insertSnippet",
+    "args": {
+      "snippet": "->"
+    },
+  },
+  {
+    "key": "ctrl+2",
+    "command": "editor.action.insertSnippet",
+    "args": {
+      "snippet": ">"
+    },
+  },
+  {
+    "key": "ctrl+3",
+    "command": "editor.action.insertSnippet",
+    "args": {
+      "snippet": "<"
+    },
+  },
+  {
+    "key": "ctrl+4",
+    "command": "editor.action.insertSnippet",
+    "args": {
+      "snippet": ")"
+    }
+  }
+]

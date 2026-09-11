@@ -1,0 +1,165 @@
+name: Repackage Inkode Windows IDE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  repack:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      PACKAGE_DIR: Inkode-win32-x64
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Check Required Files
+        run: |
+          foreach ($file in @("product.json", "icon.ico")) {
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "缺少仓库根目录文件：$file"
+            }
+          }
+
+      # 下载 Windows x64 ZIP
+      - name: Download Official VS Code
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" `
+            -OutFile "vscode.zip"
+
+          Expand-Archive `
+            -Path "vscode.zip" `
+            -DestinationPath $env:PACKAGE_DIR
+
+      # 合并配置，保留原有版本号、commit 等运行信息
+      - name: Apply Inkode Product Config
+        run: |
+          $productPath = "$env:PACKAGE_DIR\resources\app\product.json"
+
+          $product = Get-Content -LiteralPath $productPath -Raw |
+            ConvertFrom-Json -AsHashtable
+
+          $custom = Get-Content -LiteralPath "product.json" -Raw |
+            ConvertFrom-Json -AsHashtable
+
+          foreach ($key in $custom.Keys) {
+            $product[$key] = $custom[$key]
+          }
+
+          $product["win32MutexName"] = "inkode"
+
+          $product | ConvertTo-Json -Depth 100 |
+            Set-Content -LiteralPath $productPath -Encoding utf8NoBOM
+
+      # extensions 中放已经解包、可以运行的扩展目录
+      - name: Inject Portable Data and Extensions
+        run: |
+          $extensionsDir = "$env:PACKAGE_DIR\data\extensions"
+
+          New-Item -ItemType Directory `
+            -Path $extensionsDir -Force | Out-Null
+
+          if (Test-Path -LiteralPath "extensions" -PathType Container) {
+            Get-ChildItem -LiteralPath "extensions" -Force |
+              Copy-Item -Destination $extensionsDir -Recurse -Force
+          }
+
+# 3. 注入便携模式：塞入本地插件 + 用户配置 (settings.json 等)
+      - name: Inject Portable Data, Extensions & Settings
+        shell: pwsh
+        run: |
+          # 1. 创建便携模式专属目录结构
+          New-Item -ItemType Directory -Path "MyIDE-win32-x64\data\extensions" -Force
+          New-Item -ItemType Directory -Path "MyIDE-win32-x64\data\user-data\User" -Force
+
+          # 2. 拷贝本地提取的插件
+          if (Test-Path "extensions") {
+            Copy-Item -Path "extensions\*" -Destination "MyIDE-win32-x64\data\extensions" -Recurse -Force
+          }
+
+          # 3. (新增) 拷贝你的 settings.json / keybindings.json 等配置
+          if (Test-Path "config") {
+            Copy-Item -Path "config\*" -Destination "MyIDE-win32-x64\data\user-data\User" -Recurse -Force
+          }
+
+      # 直接使用 rcedit 可执行文件
+      - name: Patch Icon and Exe Name
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" `
+            -OutFile "rcedit.exe"
+
+          & ".\rcedit.exe" "$env:PACKAGE_DIR\Code.exe" `
+            --set-icon "icon.ico" `
+            --set-version-string "ProductName" "Inkode" `
+            --set-version-string "FileDescription" "墨码 Inkode" `
+            --set-version-string "InternalName" "Inkode" `
+            --set-version-string "OriginalFilename" "Inkode.exe"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "修改 EXE 资源失败"
+          }
+
+          Rename-Item `
+            -LiteralPath "$env:PACKAGE_DIR\Code.exe" `
+            -NewName "Inkode.exe"
+
+      # EXE 改名后，同步修复命令行入口
+      - name: Update CLI Launchers
+        run: |
+          $binDir = "$env:PACKAGE_DIR\bin"
+          $cmdPath = "$binDir\code.cmd"
+
+          $cmd = Get-Content -LiteralPath $cmdPath -Raw
+          $cmd.Replace("Code.exe", "Inkode.exe") |
+            Set-Content -LiteralPath $cmdPath -Encoding utf8NoBOM
+
+          Rename-Item -LiteralPath $cmdPath -NewName "inkode.cmd"
+
+          $shellPath = "$binDir\code"
+          if (Test-Path -LiteralPath $shellPath) {
+            $script = Get-Content -LiteralPath $shellPath -Raw
+            $script.Replace('NAME="Code"', 'NAME="Inkode"') |
+              Set-Content -LiteralPath $shellPath -Encoding utf8NoBOM
+
+            Rename-Item -LiteralPath $shellPath -NewName "inkode"
+          }
+
+      - name: Verify CLI
+        run: |
+          & ".\$env:PACKAGE_DIR\bin\inkode.cmd" --version
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inkode 命令行启动检查失败"
+          }
+
+      # 使用 tar 打包，同时保留扩展中的隐藏文件
+      - name: Compress Custom Package
+        run: |
+          tar.exe -a -c -f "Inkode-Windows-Portable.zip" `
+            -C $env:PACKAGE_DIR .
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "压缩失败"
+          }
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Inkode-Windows-Portable
+          path: Inkode-Windows-Portable.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
