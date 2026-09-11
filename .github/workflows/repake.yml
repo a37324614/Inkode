@@ -24,6 +24,7 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
+      # 1. 检查根目录必要文件
       - name: Check Required Files
         run: |
           foreach ($file in @("product.json", "icon.ico")) {
@@ -32,7 +33,7 @@ jobs:
             }
           }
 
-      # 下载 Windows x64 ZIP
+      # 2. 下载官方 Windows x64 ZIP 并解压
       - name: Download Official VS Code
         run: |
           Invoke-WebRequest `
@@ -43,77 +44,59 @@ jobs:
             -Path "vscode.zip" `
             -DestinationPath $env:PACKAGE_DIR
 
-
-- name: Patch product.json
-        shell: pwsh
+      # 3. 动态定位并合并定制 product.json
+      - name: Patch product.json
         run: |
-          # 1. 自动定位解压出来的 Code.exe 所在目录（无视文件夹叫什么、是否多层嵌套）
-          $codeExe = Get-ChildItem -Path . -Recurse -Filter "Code.exe" | Select-Object -First 1
-          if (-not $codeExe) {
-            Write-Error "未找到 Code.exe，请检查前序解压步骤！"
-            exit 1
+          # 自动在解压目录中查找内置的 product.json
+          $productFile = Get-ChildItem -Path $env:PACKAGE_DIR -Recurse -Filter "product.json" | Select-Object -First 1
+          if (-not $productFile) {
+            throw "在 $env:PACKAGE_DIR 下未找到任何 product.json！"
           }
-          $appDir = $codeExe.Directory.FullName
-          Write-Host "检测到程序根目录: $appDir"
+          $targetProductPath = $productFile.FullName
+          Write-Host "已定位内部配置文件: $targetProductPath"
 
-          # 2. 定位发行包内部的 product.json
-          $targetProductPath = Join-Path $appDir "resources\app\product.json"
-          if (-not (Test-Path $targetProductPath)) {
-            Write-Error "未找到内部配置文件: $targetProductPath"
-            exit 1
-          }
-
-          # 3. 读取解压包自带的官方配置
+          # 读取解压包自带的配置
           $product = Get-Content -LiteralPath $targetProductPath -Raw | ConvertFrom-Json -AsHashtable
 
-          # 4. 读取你在 Git 仓库根目录下写好的自定义 product.json 进行合并覆盖
+          # 合并仓库根目录你的自定义配置
           if (Test-Path "product.json") {
-            Write-Host "检测到仓库根目录存在自定义 product.json，正在合并..."
+            Write-Host "正在合并根目录自定义 product.json..."
             $custom = Get-Content -LiteralPath "product.json" -Raw | ConvertFrom-Json -AsHashtable
             foreach ($key in $custom.Keys) {
               $product[$key] = $custom[$key]
             }
           }
 
-          # 5. 注入防多开互斥锁名称（避免跟官方 VS Code 冲突）
+          # 注入独立互斥锁名称（防止与系统原生 VS Code 产生实例冲突）
           $product["win32MutexName"] = "inkode"
 
-          # 6. 写回应用内部
+          # 保存写回
           $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $targetProductPath -Encoding utf8NoBOM
-          Write-Host "成功写入配置到: $targetProductPath"
+          Write-Host "product.json 更新完成！"
 
-      # extensions 中放已经解包、可以运行的扩展目录
-      - name: Inject Portable Data and Extensions
-        run: |
-          $extensionsDir = "$env:PACKAGE_DIR\data\extensions"
-
-          New-Item -ItemType Directory `
-            -Path $extensionsDir -Force | Out-Null
-
-          if (Test-Path -LiteralPath "extensions" -PathType Container) {
-            Get-ChildItem -LiteralPath "extensions" -Force |
-              Copy-Item -Destination $extensionsDir -Recurse -Force
-          }
-
-# 3. 注入便携模式：塞入本地插件 + 用户配置 (settings.json 等)
+      # 4. 开启便携模式：注入插件与用户配置 (合并修正版)
       - name: Inject Portable Data, Extensions & Settings
-        shell: pwsh
         run: |
-          # 1. 创建便携模式专属目录结构
-          New-Item -ItemType Directory -Path "MyIDE-win32-x64\data\extensions" -Force
-          New-Item -ItemType Directory -Path "MyIDE-win32-x64\data\user-data\User" -Force
+          $dataDir = "$env:PACKAGE_DIR\data"
+          $extDir = "$dataDir\extensions"
+          $userDir = "$dataDir\user-data\User"
 
-          # 2. 拷贝本地提取的插件
-          if (Test-Path "extensions") {
-            Copy-Item -Path "extensions\*" -Destination "MyIDE-win32-x64\data\extensions" -Recurse -Force
+          New-Item -ItemType Directory -Path $extDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $userDir -Force | Out-Null
+
+          # 拷贝提取的插件
+          if (Test-Path -LiteralPath "extensions" -PathType Container) {
+            Write-Host "正在注入本地插件..."
+            Copy-Item -Path "extensions\*" -Destination $extDir -Recurse -Force
           }
 
-          # 3. (新增) 拷贝你的 settings.json / keybindings.json 等配置
-          if (Test-Path "config") {
-            Copy-Item -Path "config\*" -Destination "MyIDE-win32-x64\data\user-data\User" -Recurse -Force
+          # 拷贝预设配置（如 config/settings.json, config/keybindings.json）
+          if (Test-Path -LiteralPath "config" -PathType Container) {
+            Write-Host "正在注入用户配置..."
+            Copy-Item -Path "config\*" -Destination $userDir -Recurse -Force
           }
 
-      # 直接使用 rcedit 可执行文件
+      # 5. 下载 rcedit 修改 EXE 图标与产品信息，并改名为 Inkode.exe
       - name: Patch Icon and Exe Name
         run: |
           Invoke-WebRequest `
@@ -135,7 +118,7 @@ jobs:
             -LiteralPath "$env:PACKAGE_DIR\Code.exe" `
             -NewName "Inkode.exe"
 
-      # EXE 改名后，同步修复命令行入口
+      # 6. 同步更新命令行启动脚本
       - name: Update CLI Launchers
         run: |
           $binDir = "$env:PACKAGE_DIR\bin"
@@ -156,15 +139,15 @@ jobs:
             Rename-Item -LiteralPath $shellPath -NewName "inkode"
           }
 
+      # 7. 验证 CLI 状态
       - name: Verify CLI
         run: |
           & ".\$env:PACKAGE_DIR\bin\inkode.cmd" --version
-
           if ($LASTEXITCODE -ne 0) {
             throw "Inkode 命令行启动检查失败"
           }
 
-      # 使用 tar 打包，同时保留扩展中的隐藏文件
+      # 8. 使用系统自带 tar 打包，保留符号链接与隐藏文件
       - name: Compress Custom Package
         run: |
           tar.exe -a -c -f "Inkode-Windows-Portable.zip" `
@@ -174,6 +157,7 @@ jobs:
             throw "压缩失败"
           }
 
+      # 9. 上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
