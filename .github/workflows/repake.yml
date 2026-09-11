@@ -43,25 +43,44 @@ jobs:
             -Path "vscode.zip" `
             -DestinationPath $env:PACKAGE_DIR
 
-      # 合并配置，保留原有版本号、commit 等运行信息
-      - name: Apply Inkode Product Config
+
+- name: Patch product.json
+        shell: pwsh
         run: |
-          $productPath = "$env:PACKAGE_DIR\resources\app\product.json"
+          # 1. 自动定位解压出来的 Code.exe 所在目录（无视文件夹叫什么、是否多层嵌套）
+          $codeExe = Get-ChildItem -Path . -Recurse -Filter "Code.exe" | Select-Object -First 1
+          if (-not $codeExe) {
+            Write-Error "未找到 Code.exe，请检查前序解压步骤！"
+            exit 1
+          }
+          $appDir = $codeExe.Directory.FullName
+          Write-Host "检测到程序根目录: $appDir"
 
-          $product = Get-Content -LiteralPath $productPath -Raw |
-            ConvertFrom-Json -AsHashtable
-
-          $custom = Get-Content -LiteralPath "product.json" -Raw |
-            ConvertFrom-Json -AsHashtable
-
-          foreach ($key in $custom.Keys) {
-            $product[$key] = $custom[$key]
+          # 2. 定位发行包内部的 product.json
+          $targetProductPath = Join-Path $appDir "resources\app\product.json"
+          if (-not (Test-Path $targetProductPath)) {
+            Write-Error "未找到内部配置文件: $targetProductPath"
+            exit 1
           }
 
+          # 3. 读取解压包自带的官方配置
+          $product = Get-Content -LiteralPath $targetProductPath -Raw | ConvertFrom-Json -AsHashtable
+
+          # 4. 读取你在 Git 仓库根目录下写好的自定义 product.json 进行合并覆盖
+          if (Test-Path "product.json") {
+            Write-Host "检测到仓库根目录存在自定义 product.json，正在合并..."
+            $custom = Get-Content -LiteralPath "product.json" -Raw | ConvertFrom-Json -AsHashtable
+            foreach ($key in $custom.Keys) {
+              $product[$key] = $custom[$key]
+            }
+          }
+
+          # 5. 注入防多开互斥锁名称（避免跟官方 VS Code 冲突）
           $product["win32MutexName"] = "inkode"
 
-          $product | ConvertTo-Json -Depth 100 |
-            Set-Content -LiteralPath $productPath -Encoding utf8NoBOM
+          # 6. 写回应用内部
+          $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $targetProductPath -Encoding utf8NoBOM
+          Write-Host "成功写入配置到: $targetProductPath"
 
       # extensions 中放已经解包、可以运行的扩展目录
       - name: Inject Portable Data and Extensions
