@@ -176,6 +176,14 @@ jobs:
           "@
           "Updated $($targets.Count) SVG files and $($css[0].FullName)."
 
+      - name: Normalize icon for the Windows executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          python -m pip install --disable-pip-version-check Pillow==11.3.0
+          python -c "from PIL import Image; image = Image.open('icon.ico').convert('RGBA'); image.save('icon-rcedit.ico', format='ICO', sizes=[(256,256), (128,128), (64,64), (48,48), (32,32), (16,16)])"
+          if (-not (Test-Path -LiteralPath icon-rcedit.ico -PathType Leaf)) { throw 'Could not create a valid ICO file.' }
+
       - name: Patch executable branding
         run: |
           $ErrorActionPreference = 'Stop'
@@ -185,7 +193,7 @@ jobs:
           if ($actualHash -ne $env:RCEDIT_SHA256) { throw "rcedit checksum mismatch: $actualHash" }
 
           $codeExe = Join-Path $env:APP_DIR Code.exe
-          & .\rcedit.exe $codeExe --set-icon (Resolve-Path icon.ico) --set-version-string ProductName Inkode --set-version-string FileDescription 'Inkode Code Editor' --set-version-string InternalName Inkode --set-version-string OriginalFilename Inkode.exe
+          & .\rcedit.exe $codeExe --set-icon (Resolve-Path icon-rcedit.ico) --set-version-string ProductName Inkode --set-version-string FileDescription 'Inkode Code Editor' --set-version-string InternalName Inkode --set-version-string OriginalFilename Inkode.exe
           if ($LASTEXITCODE -ne 0) { throw "rcedit failed with exit code $LASTEXITCODE" }
           Rename-Item -LiteralPath $codeExe -NewName Inkode.exe
 
