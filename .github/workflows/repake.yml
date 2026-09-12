@@ -2,9 +2,11 @@ name: Repackage Inkode Windows IDE
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+    inputs:
+      vscode_version:
+        description: Exact VS Code version to repackage, for example 1.104.0
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,302 +14,83 @@ permissions:
 jobs:
   repack:
     runs-on: windows-latest
-
     defaults:
       run:
         shell: pwsh
-
     env:
       PACKAGE_DIR: Inkode-win32-x64
-      PYTHONIOENCODING: "utf-8"
+      VSCODE_VERSION: ${{ inputs.vscode_version }}
+      RCEDIT_SHA256: 3E7801DB1A5EDBEC91B49A24A094AAD776CB4515488EA5A4CA2289C400EADE2A
 
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # 1. 检查根目录必要文件
-      - name: Check Required Files
+      - name: Validate inputs and source files
         run: |
-          foreach ($file in @("product.json", "icon.ico")) {
-            if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          if ($env:VSCODE_VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'vscode_version must be an exact version such as 1.104.0; latest is intentionally unsupported.'
+          }
+          foreach ($file in 'product.json', 'icon.ico') {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
               throw "Missing required repository file: $file"
             }
           }
 
-      # 2. 下载并使用系统原生 tar 快速解压，锁定 APP_DIR 绝对路径
-      - name: Download Official VS Code
+      - name: Download and unpack VS Code
         run: |
-          Invoke-WebRequest `
-            -Uri "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" `
-            -OutFile "vscode.zip"
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $url = "https://update.code.visualstudio.com/$env:VSCODE_VERSION/win32-x64-archive/stable"
+          Invoke-WebRequest -Uri $url -OutFile vscode.zip
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath vscode.zip).Hash
+          "VS Code archive SHA-256: $archiveHash" | Tee-Object -FilePath download-info.txt
 
           New-Item -ItemType Directory -Path $env:PACKAGE_DIR -Force | Out-Null
-          tar.exe -xf "vscode.zip" -C "$env:PACKAGE_DIR"
+          tar.exe -xf vscode.zip -C $env:PACKAGE_DIR
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to extract the VS Code archive.' }
 
-          # 自动定位 Code.exe 所在物理主目录
-          $codeExe = Get-ChildItem -Path $env:PACKAGE_DIR -Recurse -Filter "Code.exe" | Select-Object -First 1
-          if (-not $codeExe) {
-            throw "Failed to locate Code.exe after extraction."
-          }
+          $codeExe = Get-ChildItem -Path $env:PACKAGE_DIR -Recurse -File -Filter Code.exe | Select-Object -First 1
+          if (-not $codeExe) { throw 'Code.exe was not found after extraction.' }
+          "APP_DIR=$($codeExe.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VSCODE_ARCHIVE_SHA256=$archiveHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $appDir = $codeExe.Directory.FullName
-          Write-Host "Locked APP_DIR: $appDir"
-          "APP_DIR=$appDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      # 3. 物理删除内置的 AI / Copilot / Chat 扩展
-      - name: Purge Built-in AI Extensions
+      - name: Remove selected built-in extensions
         run: |
-          $builtinExtDir = "$env:APP_DIR\resources\app\extensions"
-          if (Test-Path $builtinExtDir) {
-            Write-Host "Scanning and removing built-in AI extensions..."
-            $aiExtensions = Get-ChildItem -Path $builtinExtDir -Directory | Where-Object { 
-              $_.Name -like "*copilot*" -or $_.Name -like "*chat*"
-            }
-            foreach ($ext in $aiExtensions) {
-              Write-Host "Removing: $($ext.Name)"
-              Remove-Item -LiteralPath $ext.FullName -Recurse -Force
-            }
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $extensionsDir = Join-Path $env:APP_DIR 'resources\app\extensions'
+          if (-not (Test-Path -LiteralPath $extensionsDir -PathType Container)) {
+            throw "Built-in extensions directory not found: $extensionsDir"
           }
 
-      # 4. 极限瘦身：清理 SourceMap、调试符号与冷门内置语言
-      - name: Slim and Trim Bloatware
-        run: |
-          Write-Host "Cleaning debug maps and pdb files..."
-          Get-ChildItem -Path "$env:APP_DIR" -Recurse -Include "*.map", "*.pdb" | Remove-Item -Force -ErrorAction SilentlyContinue
-
-          # 仅保留英文与简体中文界面语言包
-          $localesDir = "$env:APP_DIR\locales"
-          if (Test-Path $localesDir) {
-            Write-Host "Cleaning unused locales..."
-            Get-ChildItem -Path $localesDir -Filter "*.pak" | Where-Object {
-              $_.Name -ne "en-US.pak" -and $_.Name -ne "zh-CN.pak"
-            } | Remove-Item -Force
-          }
-
-          # 剔除冷门语言语法高亮
-          $builtinExtDir = "$env:APP_DIR\resources\app\extensions"
-          if (Test-Path $builtinExtDir) {
-            $uselessLanguages = @(
-              "coffeescript", "csharp", "fsharp", "groovy", "handlebars",
-              "hlsl", "less", "objective-c", "perl", "pug", "r",
-              "razor", "ruby", "rust", "scss", "shaderlab", "vb"
-            )
-            foreach ($lang in $uselessLanguages) {
-              $targetDir = Join-Path $builtinExtDir $lang
-              if (Test-Path $targetDir) {
-                Remove-Item -LiteralPath $targetDir -Recurse -Force
-              }
+          # Keep this list exact: broad '*chat*' matching can remove unrelated extensions.
+          $remove = @(
+            'github.copilot', 'github.copilot-chat',
+            'coffeescript', 'csharp', 'fsharp', 'groovy', 'handlebars',
+            'hlsl', 'less', 'objective-c', 'perl', 'pug', 'r', 'razor',
+            'ruby', 'rust', 'scss', 'shaderlab', 'vb'
+          )
+          $removed = @()
+          foreach ($name in $remove) {
+            $path = Join-Path $extensionsDir $name
+            if (Test-Path -LiteralPath $path -PathType Container) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+              $removed += $name
             }
           }
+          "Removed built-in extensions: $($removed -join ', ')"
 
-      # 5. 合并并更新 product.json (去遥测与设置互斥锁)
-      - name: Patch product.json
+      - name: Trim debug files and locales
         run: |
-          $repoRoot = (Get-Location).Path
-          $foundProduct = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "product.json" | Where-Object {
-            $_.DirectoryName -ne $repoRoot
-          } | Select-Object -First 1
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $removedMaps = @(Get-ChildItem -Path $env:APP_DIR -Recurse -File -Include '*.map', '*.pdb')
+          $removedMaps | Remove-Item -Force
 
-          $product = @{}
-          if ($foundProduct) {
-            Write-Host "Found existing product.json: $($foundProduct.FullName)"
-            $product = Get-Content -LiteralPath $foundProduct.FullName -Raw | ConvertFrom-Json -AsHashtable
-          }
-
-          if (Test-Path "product.json") {
-            Write-Host "Merging custom product.json..."
-            $custom = Get-Content -LiteralPath "product.json" -Raw | ConvertFrom-Json -AsHashtable
-            foreach ($key in $custom.Keys) {
-              $product[$key] = $custom[$key]
-            }
-          }
-
-          $product["enableTelemetry"] = $false
-          $product["win32MutexName"] = "inkode"
-
-          # 双重写入：内部 resources/app 目录与根目录
-          $targetDir = Join-Path "$env:APP_DIR" "resources\app"
-          if (-not (Test-Path $targetDir)) {
-            New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-          }
-          $destJsonPath = Join-Path $targetDir "product.json"
-          $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $destJsonPath -Encoding utf8NoBOM
-          Copy-Item -LiteralPath $destJsonPath -Destination "$env:APP_DIR\product.json" -Force
-          Write-Host "product.json successfully patched."
-
-      # 6. 开启便携模式：注入插件与用户配置
-      - name: Inject Portable Data, Extensions & Settings
-        run: |
-          $dataDir = "$env:APP_DIR\data"
-          $extDir = "$dataDir\extensions"
-          $userDir = "$dataDir\user-data\User"
-
-          New-Item -ItemType Directory -Path $extDir -Force | Out-Null
-          New-Item -ItemType Directory -Path $userDir -Force | Out-Null
-
-          if (Test-Path -LiteralPath "extensions" -PathType Container) {
-            Write-Host "Injecting extensions..."
-            Copy-Item -Path "extensions\*" -Destination $extDir -Recurse -Force
-          }
-
-          if (Test-Path -LiteralPath "config" -PathType Container) {
-            Write-Host "Injecting config files..."
-            Copy-Item -Path "config\*" -Destination $userDir -Recurse -Force
-          }
-
-      # 7. 格式化并修复 ICO 文件（采用独立脚本，规避终端编码错误）
-      - name: Validate and Fix ICO Format
-        run: |
-          python -m pip install --upgrade pillow
-
-          $pyScript = @'
-from PIL import Image
-
-try:
-    img = Image.open('icon.ico')
-    img = img.convert('RGBA')
-    sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
-    img.save('icon_valid.ico', format='ICO', sizes=sizes)
-    print('SUCCESS: ICO conversion complete.')
-except Exception as e:
-    print(f'ERROR: {e}')
-    exit(1)
-'@
-          Set-Content -Path "fix_ico.py" -Value $pyScript -Encoding utf8NoBOM
-          python fix_ico.py
-          Remove-Item -Path "fix_ico.py" -Force
-          Move-Item -Path "icon_valid.ico" -Destination "icon.ico" -Force
-
-      # 8. 替换客户端内部所有水印与 Logo（避免误伤 codicon）
-      - name: Replace Internal UI Images and Icons
-        run: |
-          if (-not (Test-Path "icon.svg")) {
-            Write-Host "Generating fallback icon.svg from icon.ico..."
-            $svgPy = @'
-from PIL import Image
-import io, base64
-
-img = Image.open('icon.ico')
-buf = io.BytesIO()
-img.save(buf, format='PNG')
-b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-
-svg_content = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-    <image width="256" height="256" href="data:image/png;base64,{b64}"/>
-</svg>'''
-with open('icon.svg', 'w', encoding='utf-8') as f:
-    f.write(svg_content)
-print('SUCCESS: SVG generated.')
-'@
-            Set-Content -Path "make_svg.py" -Value $svgPy -Encoding utf8NoBOM
-            python make_svg.py
-            Remove-Item -Path "make_svg.py" -Force
-          }
-
-          # 仅替换水印和主 Logo
-          $targetSvgs = Get-ChildItem -Path "$env:APP_DIR\resources\app\out" -Recurse -Filter "*.svg" | Where-Object {
-            $_.Name -like "letterpress*.svg" -or $_.Name -eq "code.svg"
-          }
-
-          foreach ($item in $targetSvgs) {
-            Write-Host "Overwriting SVG: $($item.FullName)"
-            Copy-Item -Path "icon.svg" -Destination $item.FullName -Force
-          }
-
-          # 注入 CSS 劫持左上角及背景水印
-          $cssFile = Get-ChildItem -Path "$env:APP_DIR\resources\app\out" -Recurse -Filter "workbench.desktop.main.css" | Select-Object -First 1
-          if ($cssFile) {
-            $svgBytes = [System.IO.File]::ReadAllBytes((Resolve-Path "icon.svg").Path)
-            $b64Svg = [Convert]::ToBase64String($svgBytes)
-            $customCss = @"
-
-          /* Custom Inkode Branding Override */
-          .window-appicon:not(.codicon) {
-            background-image: url("data:image/svg+xml;base64,$b64Svg") !important;
-            background-size: contain !important;
-          }
-          .part.editor > .content .empty-editor-group:before,
-          .monaco-workbench .part.editor.has-watermark > .content.empty .editor-group-container > .editor-group-letterpress,
-          .part.editor > .content .editor-group-container .editor-group-watermark > .letterpress {
-            background-image: url("data:image/svg+xml;base64,$b64Svg") !important;
-            background-size: 160px !important;
-            opacity: 0.15 !important;
-          }
-"@
-            Add-Content -LiteralPath $cssFile.FullName -Value $customCss -Encoding utf8NoBOM
-            Write-Host "Injected custom CSS into: $($cssFile.FullName)"
-          }
-
-      # 9. 修改 EXE 属性与图标，重命名为 Inkode.exe (使用全英文元数据，杜绝 PE 编码失败)
-      - name: Patch Icon and Exe Name
-        run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" `
-            -OutFile "rcedit.exe"
-
-          $codeExePath = "$env:APP_DIR\Code.exe"
-          $iconPath = (Resolve-Path "icon.ico").Path
-
-          & ".\rcedit.exe" "$codeExePath" `
-            --set-icon "$iconPath" `
-            --set-version-string "ProductName" "Inkode" `
-            --set-version-string "FileDescription" "Inkode Code Editor" `
-            --set-version-string "InternalName" "Inkode" `
-            --set-version-string "OriginalFilename" "Inkode.exe"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "rcedit failed with exit code: $LASTEXITCODE"
-          }
-
-          Rename-Item -LiteralPath $codeExePath -NewName "Inkode.exe"
-
-      # 10. 同步修复 CLI 终端命令 (inkode.cmd)
-      - name: Update CLI Launchers
-        run: |
-          $binDir = "$env:APP_DIR\bin"
-          if (Test-Path $binDir) {
-            $cmdPath = Join-Path $binDir "code.cmd"
-            if (Test-Path $cmdPath) {
-              $cmd = Get-Content -LiteralPath $cmdPath -Raw
-              $cmd.Replace("Code.exe", "Inkode.exe") | Set-Content -LiteralPath $cmdPath -Encoding utf8NoBOM
-              Rename-Item -LiteralPath $cmdPath -NewName "inkode.cmd" -Force
-            }
-
-            $shellPath = Join-Path $binDir "code"
-            if (Test-Path $shellPath) {
-              $script = Get-Content -LiteralPath $shellPath -Raw
-              $script.Replace('NAME="Code"', 'NAME="Inkode"') | Set-Content -LiteralPath $shellPath -Encoding utf8NoBOM
-              Rename-Item -LiteralPath $shellPath -NewName "inkode" -Force
-            }
-          }
-
-      # 11. 验证 CLI 执行入口（容错模式）
-      - name: Verify CLI
-        run: |
-          $cliCmd = "$env:APP_DIR\bin\inkode.cmd"
-          if (Test-Path $cliCmd) {
-            Write-Host "Testing CLI launcher..."
-            try {
-              & "$cliCmd" --version
-            } catch {
-              Write-Warning "CLI probe warning: $_"
-            }
-          }
-
-      # 12. 极限压缩打包为 ZIP
-      - name: Compress Custom Package
-        run: |
-          tar.exe -a -c -f "Inkode-Windows-Portable.zip" -C "$env:APP_DIR" .
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to compress portable package."
-          }
-
-      # 13. 上传最终产物
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Inkode-Windows-Portable
-          path: Inkode-Windows-Portable.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+          $localesDir = Join-Path $env:APP_DIR 'locales'
+          if (Test-Path -LiteralPath $localesDir -PathType Container) {
+            $otherLocales = @(Get-ChildItem -Path $localesDir -File -Filter '*.pak' |
+              Where-Object Name -notin 'en-US.pak', 'zh-CN.pak')
