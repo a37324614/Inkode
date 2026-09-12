@@ -24,7 +24,7 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # 1. 检查根目录必要文件
+      # 1. 检查必要文件
       - name: Check Required Files
         run: |
           foreach ($file in @("product.json", "icon.ico")) {
@@ -44,11 +44,11 @@ jobs:
             -Path "vscode.zip" `
             -DestinationPath $env:PACKAGE_DIR
 
-      # 3. 【核心去除 AI】物理删除官方内置的 AI、Copilot、遥测扩展
+      # 3. 物理删除官方内置的 AI / Copilot / 遥测模块
       - name: Purge Built-in AI Extensions
         run: |
           $builtinExtDir = "$env:PACKAGE_DIR\resources\app\extensions"
-          Write-Host "正在扫描并清理内置 AI 模块..."
+          Write-Host "正在扫描并物理删除内置 AI 插件..."
           $aiExtensions = Get-ChildItem -Path $builtinExtDir -Directory | Where-Object { 
             $_.Name -like "*copilot*" -or $_.Name -like "*chat*"
           }
@@ -57,7 +57,7 @@ jobs:
             Remove-Item -LiteralPath $ext.FullName -Recurse -Force
           }
 
-      # 4. 定位并合并定制 product.json (去遥测与修改品牌)
+      # 4. 定位并合并定制 product.json
       - name: Patch product.json
         run: |
           $productFile = Get-ChildItem -Path $env:PACKAGE_DIR -Recurse -Filter "product.json" | Select-Object -First 1
@@ -75,14 +75,13 @@ jobs:
             }
           }
 
-          # 强制关闭遥测与设置独立互斥体
           $product["enableTelemetry"] = $false
           $product["win32MutexName"] = "inkode"
 
           $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $targetProductPath -Encoding utf8NoBOM
-          Write-Host "product.json 更新并净化完成！"
+          Write-Host "product.json 更新并去遥测完成！"
 
-      # 5. 开启便携模式：注入插件与用户静音配置 (config/settings.json)
+      # 5. 开启便携模式：注入插件与用户配置
       - name: Inject Portable Data, Extensions & Settings
         run: |
           $dataDir = "$env:PACKAGE_DIR\data"
@@ -100,7 +99,7 @@ jobs:
             Copy-Item -Path "config\*" -Destination $userDir -Recurse -Force
           }
 
-      # 6. 自动修复 ICO 格式（确保 rcedit 100% 成功）
+      # 6. 验证/修复合法标准多尺寸 ICO 图标
       - name: Validate and Fix ICO Format
         run: |
           python -m pip install --upgrade pillow
@@ -115,7 +114,53 @@ jobs:
           "@
           Move-Item -Path "icon_valid.ico" -Destination "icon.ico" -Force
 
-      # 7. 修改 EXE 图标与产品信息，改名为 Inkode.exe
+      # 7. 【核心新增】全量替换软件内部所有界面 SVG 图标与水印
+      - name: Replace Internal UI Images and Icons
+        run: |
+          if (-not (Test-Path "icon.svg")) {
+            Write-Host "自动从 icon.ico 生成内嵌 SVG 替代品..."
+            python -c @"
+            import base64
+            with open('icon.ico', 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('ascii')
+            svg_content = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+                <image width="256" height="256" href="data:image/x-icon;base64,{b64}"/>
+            </svg>'''
+            with open('icon.svg', 'w', encoding='utf-8') as f:
+                f.write(svg_content)
+            "@
+          }
+
+          $targetSvgs = Get-ChildItem -Path "$env:PACKAGE_DIR\resources\app\out" -Recurse -Filter "*.svg" | Where-Object {
+            $_.Name -like "*code*" -or $_.Name -like "*letterpress*" -or $_.Name -like "*logo*"
+          }
+
+          foreach ($item in $targetSvgs) {
+            Write-Host "覆写内部图标: $($item.FullName)"
+            Copy-Item -Path "icon.svg" -Destination $item.FullName -Force
+          }
+
+          # 注入 CSS 强制劫持左上角及居中水印图标
+          $cssFile = Get-ChildItem -Path "$env:PACKAGE_DIR\resources\app\out\vs\workbench" -Filter "workbench.desktop.main.css" | Select-Object -First 1
+          if ($cssFile) {
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path "icon.svg"))
+            $b64Svg = [Convert]::ToBase64String($bytes)
+            $customCss = @"
+
+          /* Custom Inkode Branding Override */
+          .window-appicon:not(.codicon) {
+            background-image: url("data:image/svg+xml;base64,$b64Svg") !important;
+            background-size: contain !important;
+          }
+          .part.editor > .content .empty-editor-group:before {
+            background-image: url("data:image/svg+xml;base64,$b64Svg") !important;
+            opacity: 0.15 !important;
+          }
+          "@
+            Add-Content -LiteralPath $cssFile.FullName -Value $customCss -Encoding utf8NoBOM
+          }
+
+      # 8. 修改 EXE 图标与产品信息，改名为 Inkode.exe
       - name: Patch Icon and Exe Name
         run: |
           Invoke-WebRequest `
@@ -137,7 +182,7 @@ jobs:
             -LiteralPath "$env:PACKAGE_DIR\Code.exe" `
             -NewName "Inkode.exe"
 
-      # 8. 同步更新命令行启动脚本
+      # 9. 同步更新命令行启动脚本
       - name: Update CLI Launchers
         run: |
           $binDir = "$env:PACKAGE_DIR\bin"
@@ -158,7 +203,7 @@ jobs:
             Rename-Item -LiteralPath $shellPath -NewName "inkode"
           }
 
-      # 9. 验证 CLI 状态
+      # 10. 验证 CLI 状态
       - name: Verify CLI
         run: |
           & ".\$env:PACKAGE_DIR\bin\inkode.cmd" --version
@@ -166,7 +211,7 @@ jobs:
             throw "Inkode 命令行启动检查失败"
           }
 
-      # 10. 使用系统自带 tar 打包
+      # 11. 打包压缩
       - name: Compress Custom Package
         run: |
           tar.exe -a -c -f "Inkode-Windows-Portable.zip" `
@@ -176,7 +221,7 @@ jobs:
             throw "压缩失败"
           }
 
-      # 11. 上传产物
+      # 12. 上传制品
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
