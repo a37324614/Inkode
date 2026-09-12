@@ -223,7 +223,9 @@ jobs:
           tar.exe -a -c -f Inkode-Windows-Portable.zip -C $env:APP_DIR .
           if ($LASTEXITCODE -ne 0) { throw 'Failed to create ZIP.' }
           $entries = tar.exe -tf Inkode-Windows-Portable.zip
-          if ($LASTEXITCODE -ne 0 -or $entries -notmatch '(^|/)Inkode\.exe$' -or $entries -notmatch '(^|/)BUILD-INFO\.txt$') {
+          $hasExe = @($entries | Where-Object { $_ -match '(^|/)Inkode\.exe$' }).Count -gt 0
+          $hasBuildInfo = @($entries | Where-Object { $_ -match '(^|/)BUILD-INFO\.txt$' }).Count -gt 0
+          if ($LASTEXITCODE -ne 0 -or -not $hasExe -or -not $hasBuildInfo) {
             throw 'ZIP validation failed: Inkode.exe or BUILD-INFO.txt is missing.'
           }
 
