@@ -7,6 +7,10 @@ on:
         description: Exact VS Code version to repackage, for example 1.104.0
         required: true
         type: string
+      vscode_archive_sha256:
+        description: Optional trusted SHA-256 for that official VS Code ZIP
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +24,7 @@ jobs:
     env:
       PACKAGE_DIR: Inkode-win32-x64
       VSCODE_VERSION: ${{ inputs.vscode_version }}
+      VSCODE_ARCHIVE_EXPECTED_SHA256: ${{ inputs.vscode_archive_sha256 }}
       RCEDIT_SHA256: 3E7801DB1A5EDBEC91B49A24A094AAD776CB4515488EA5A4CA2289C400EADE2A
 
     steps:
@@ -32,6 +37,9 @@ jobs:
           Set-StrictMode -Version Latest
           if ($env:VSCODE_VERSION -notmatch '^\d+\.\d+\.\d+$') {
             throw 'vscode_version must be an exact version such as 1.104.0; latest is intentionally unsupported.'
+          }
+          if ($env:VSCODE_ARCHIVE_EXPECTED_SHA256 -and $env:VSCODE_ARCHIVE_EXPECTED_SHA256 -notmatch '^[A-Fa-f0-9]{64}$') {
+            throw 'vscode_archive_sha256 must be blank or a 64-character SHA-256 value.'
           }
           foreach ($file in 'product.json', 'icon.ico') {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -46,6 +54,12 @@ jobs:
           $url = "https://update.code.visualstudio.com/$env:VSCODE_VERSION/win32-x64-archive/stable"
           Invoke-WebRequest -Uri $url -OutFile vscode.zip
           $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath vscode.zip).Hash
+          if ($env:VSCODE_ARCHIVE_EXPECTED_SHA256 -and $archiveHash -ne $env:VSCODE_ARCHIVE_EXPECTED_SHA256.ToUpperInvariant()) {
+            throw "VS Code archive checksum mismatch: $archiveHash"
+          }
+          if (-not $env:VSCODE_ARCHIVE_EXPECTED_SHA256) {
+            Write-Warning 'No expected VS Code archive hash supplied; recording the downloaded hash in BUILD-INFO.txt.'
+          }
           "VS Code archive SHA-256: $archiveHash" | Tee-Object -FilePath download-info.txt
 
           New-Item -ItemType Directory -Path $env:PACKAGE_DIR -Force | Out-Null
@@ -92,5 +106,124 @@ jobs:
 
           $localesDir = Join-Path $env:APP_DIR 'locales'
           if (Test-Path -LiteralPath $localesDir -PathType Container) {
-            $otherLocales = @(Get-ChildItem -Path $localesDir -File -Filter '*.pak' |
-              Where-Object Name -notin 'en-US.pak', 'zh-CN.pak')
+            Get-ChildItem -Path $localesDir -File -Filter '*.pak' |
+              Where-Object { $_.Name -notin @('en-US.pak', 'zh-CN.pak') } |
+              Remove-Item -Force
+          }
+          "Removed $($removedMaps.Count) debug files."
+
+      - name: Patch product configuration
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $upstreamPath = Join-Path $env:APP_DIR 'resources\app\product.json'
+          if (-not (Test-Path -LiteralPath $upstreamPath -PathType Leaf)) {
+            throw "Upstream product.json not found: $upstreamPath"
+          }
+
+          $product = Get-Content -LiteralPath $upstreamPath -Raw | ConvertFrom-Json -AsHashtable
+          $custom = Get-Content -LiteralPath product.json -Raw | ConvertFrom-Json -AsHashtable
+          foreach ($key in $custom.Keys) { $product[$key] = $custom[$key] }
+
+          $product.enableTelemetry = $false
+          $product.win32MutexName = 'inkode'
+          # The corresponding extensions were removed above.
+          $product.Remove('defaultChatAgent') | Out-Null
+          $product.Remove('trustedExtensionAuthAccess') | Out-Null
+          $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $upstreamPath -Encoding utf8NoBOM
+
+      - name: Inject portable data
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $dataDir = Join-Path $env:APP_DIR 'data'
+          $extensionDestination = Join-Path $dataDir 'extensions'
+          $userDestination = Join-Path $dataDir 'user-data\User'
+          New-Item -ItemType Directory -Force -Path $extensionDestination, $userDestination | Out-Null
+
+          if (Test-Path -LiteralPath extensions -PathType Container) {
+            Get-ChildItem -LiteralPath extensions -Force | Copy-Item -Destination $extensionDestination -Recurse -Force
+          }
+          if (Test-Path -LiteralPath config -PathType Container) {
+            Get-ChildItem -LiteralPath config -Force | Copy-Item -Destination $userDestination -Recurse -Force
+          }
+
+      - name: Replace UI branding when icon.svg is provided
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          if (-not (Test-Path -LiteralPath icon.svg -PathType Leaf)) {
+            Write-Warning 'icon.svg is absent: retaining stock in-app SVG branding. icon.ico is still applied to Inkode.exe.'
+            exit 0
+          }
+
+          $outDir = Join-Path $env:APP_DIR 'resources\app\out'
+          $targets = @(Get-ChildItem -Path $outDir -Recurse -File -Filter '*.svg' |
+            Where-Object { $_.Name -like 'letterpress*.svg' -or $_.Name -eq 'code.svg' })
+          if ($targets.Count -eq 0) { throw 'No expected branding SVGs were found.' }
+          foreach ($target in $targets) { Copy-Item -LiteralPath icon.svg -Destination $target.FullName -Force }
+
+          $css = @(Get-ChildItem -Path $outDir -Recurse -File -Filter 'workbench.desktop.main.css' | Select-Object -First 1)
+          if ($css.Count -eq 0) { throw 'workbench.desktop.main.css was not found.' }
+          $svgBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path icon.svg)))
+          Add-Content -LiteralPath $css[0].FullName -Encoding utf8NoBOM -Value @"
+
+/* Inkode branding */
+.window-appicon:not(.codicon) { background-image: url("data:image/svg+xml;base64,$svgBase64") !important; background-size: contain !important; }
+.part.editor > .content .empty-editor-group:before,
+.monaco-workbench .part.editor.has-watermark > .content.empty .editor-group-container > .editor-group-letterpress,
+.part.editor > .content .editor-group-container .editor-group-watermark > .letterpress { background-image: url("data:image/svg+xml;base64,$svgBase64") !important; background-size: 160px !important; opacity: .15 !important; }
+"@
+          "Updated $($targets.Count) SVG files and $($css[0].FullName)."
+
+      - name: Patch executable branding
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          Invoke-WebRequest -Uri 'https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe' -OutFile rcedit.exe
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath rcedit.exe).Hash
+          if ($actualHash -ne $env:RCEDIT_SHA256) { throw "rcedit checksum mismatch: $actualHash" }
+
+          $codeExe = Join-Path $env:APP_DIR Code.exe
+          & .\rcedit.exe $codeExe --set-icon (Resolve-Path icon.ico) --set-version-string ProductName Inkode --set-version-string FileDescription 'Inkode Code Editor' --set-version-string InternalName Inkode --set-version-string OriginalFilename Inkode.exe
+          if ($LASTEXITCODE -ne 0) { throw "rcedit failed with exit code $LASTEXITCODE" }
+          Rename-Item -LiteralPath $codeExe -NewName Inkode.exe
+
+      - name: Update and verify CLI launcher
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $cmd = Join-Path $env:APP_DIR 'bin\code.cmd'
+          if (-not (Test-Path -LiteralPath $cmd -PathType Leaf)) { throw 'bin\\code.cmd was not found.' }
+          (Get-Content -LiteralPath $cmd -Raw).Replace('Code.exe', 'Inkode.exe') |
+            Set-Content -LiteralPath $cmd -Encoding utf8NoBOM
+          Rename-Item -LiteralPath $cmd -NewName inkode.cmd
+          & (Join-Path $env:APP_DIR 'bin\inkode.cmd') --version
+          if ($LASTEXITCODE -ne 0) { throw "CLI verification failed with exit code $LASTEXITCODE" }
+
+      - name: Record build information and package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          @(
+            "VS Code version: $env:VSCODE_VERSION"
+            "VS Code archive SHA-256: $env:VSCODE_ARCHIVE_SHA256"
+            "Git commit: $env:GITHUB_SHA"
+            "Workflow run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          ) | Set-Content -LiteralPath (Join-Path $env:APP_DIR BUILD-INFO.txt) -Encoding utf8NoBOM
+
+          tar.exe -a -c -f Inkode-Windows-Portable.zip -C $env:APP_DIR .
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to create ZIP.' }
+          $entries = tar.exe -tf Inkode-Windows-Portable.zip
+          if ($LASTEXITCODE -ne 0 -or $entries -notmatch '(^|/)Inkode\.exe$' -or $entries -notmatch '(^|/)BUILD-INFO\.txt$') {
+            throw 'ZIP validation failed: Inkode.exe or BUILD-INFO.txt is missing.'
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Inkode-Windows-Portable-${{ inputs.vscode_version }}
+          path: Inkode-Windows-Portable.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
