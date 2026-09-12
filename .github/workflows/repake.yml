@@ -168,12 +168,12 @@ jobs:
           $svgBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path icon.svg)))
           Add-Content -LiteralPath $css[0].FullName -Encoding utf8NoBOM -Value @"
 
-/* Inkode branding */
-.window-appicon:not(.codicon) { background-image: url("data:image/svg+xml;base64,$svgBase64") !important; background-size: contain !important; }
-.part.editor > .content .empty-editor-group:before,
-.monaco-workbench .part.editor.has-watermark > .content.empty .editor-group-container > .editor-group-letterpress,
-.part.editor > .content .editor-group-container .editor-group-watermark > .letterpress { background-image: url("data:image/svg+xml;base64,$svgBase64") !important; background-size: 160px !important; opacity: .15 !important; }
-"@
+          /* Inkode branding */
+          .window-appicon:not(.codicon) { background-image: url("data:image/svg+xml;base64,$svgBase64") !important; background-size: contain !important; }
+          .part.editor > .content .empty-editor-group:before,
+          .monaco-workbench .part.editor.has-watermark > .content.empty .editor-group-container > .editor-group-letterpress,
+          .part.editor > .content .editor-group-container .editor-group-watermark > .letterpress { background-image: url("data:image/svg+xml;base64,$svgBase64") !important; background-size: 160px !important; opacity: .15 !important; }
+          "@
           "Updated $($targets.Count) SVG files and $($css[0].FullName)."
 
       - name: Patch executable branding
