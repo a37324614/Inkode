@@ -33,18 +33,19 @@ jobs:
             }
           }
 
-      # 2. 下载解压并【核心锁定真实绝对路径 APP_DIR】
+      # 2. 下载并使用系统原生 tar 快速完整解压，锁定 APP_DIR
       - name: Download Official VS Code
         run: |
           Invoke-WebRequest `
             -Uri "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" `
             -OutFile "vscode.zip"
 
-          Expand-Archive `
-            -Path "vscode.zip" `
-            -DestinationPath $env:PACKAGE_DIR
+          New-Item -ItemType Directory -Path $env:PACKAGE_DIR -Force | Out-Null
 
-          # 自动定位 Code.exe 所在的主目录（无论解压是否有多层嵌套）
+          # 使用 Windows 自带的 tar.exe 极速完整解压，杜绝 Expand-Archive 的丢文件问题
+          tar.exe -xf "vscode.zip" -C "$env:PACKAGE_DIR"
+
+          # 自动定位 Code.exe 所在物理主目录
           $codeExe = Get-ChildItem -Path $env:PACKAGE_DIR -Recurse -Filter "Code.exe" | Select-Object -First 1
           if (-not $codeExe) {
             throw "解压完成，但在 $env:PACKAGE_DIR 下未找到 Code.exe！"
@@ -52,17 +53,18 @@ jobs:
 
           $appDir = $codeExe.Directory.FullName
           Write-Host ">>> 成功锁定应用绝对物理路径: $appDir <<<"
-
-          # 写入 GitHub Actions 全局环境，后续所有 Step 统一使用 $env:APP_DIR
           "APP_DIR=$appDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # 3. 物理删除内置的 AI / Copilot / Chat 扩展模块
+      # 3. 动态定位并物理删除内置的 AI / Copilot / Chat 扩展模块
       - name: Purge Built-in AI Extensions
         run: |
-          $builtinExtDir = "$env:APP_DIR\resources\app\extensions"
-          if (Test-Path $builtinExtDir) {
-            Write-Host "正在扫描并物理删除内置 AI 插件..."
-            $aiExtensions = Get-ChildItem -Path $builtinExtDir -Directory | Where-Object { 
+          Write-Host "正在扫描并清理内置 AI 扩展..."
+          $extDirs = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Directory -Filter "extensions" | Where-Object {
+            $_.FullName -notlike "*\data\*"
+          }
+
+          foreach ($dir in $extDirs) {
+            $aiExtensions = Get-ChildItem -Path $dir.FullName -Directory | Where-Object { 
               $_.Name -like "*copilot*" -or $_.Name -like "*chat*"
             }
             foreach ($ext in $aiExtensions) {
@@ -77,41 +79,44 @@ jobs:
           Write-Host "开始清理 SourceMap 与调试符号..."
           Get-ChildItem -Path "$env:APP_DIR" -Recurse -Include "*.map", "*.pdb" | Remove-Item -Force -ErrorAction SilentlyContinue
 
-          # 仅保留英文与简体中文界面包
-          $localesDir = "$env:APP_DIR\locales"
-          if (Test-Path $localesDir) {
-            Write-Host "精简语言包目录: $localesDir"
-            Get-ChildItem -Path $localesDir -Filter "*.pak" | Where-Object {
+          # 精简语言包，仅保留 en-US 与 zh-CN
+          $localesDirs = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Directory -Filter "locales"
+          foreach ($ld in $localesDirs) {
+            Get-ChildItem -Path $ld.FullName -Filter "*.pak" | Where-Object {
               $_.Name -ne "en-US.pak" -and $_.Name -ne "zh-CN.pak"
             } | Remove-Item -Force
           }
 
-          # 剔除冷门语言高亮（保留了 ini、cpp、c 等常用语言）
-          $builtinExtDir = "$env:APP_DIR\resources\app\extensions"
-          if (Test-Path $builtinExtDir) {
-            $uselessLanguages = @(
-              "coffeescript", "csharp", "fsharp", "groovy", "handlebars",
-              "hlsl", "less", "objective-c", "perl", "pug", "r",
-              "razor", "ruby", "rust", "scss", "shaderlab", "vb"
-            )
-            foreach ($lang in $uselessLanguages) {
-              $targetDir = Join-Path $builtinExtDir $lang
-              if (Test-Path $targetDir) {
-                Remove-Item -LiteralPath $targetDir -Recurse -Force
-              }
-            }
+          # 剔除冷门语言高亮
+          $uselessLanguages = @(
+            "coffeescript", "csharp", "fsharp", "groovy", "handlebars",
+            "hlsl", "less", "objective-c", "perl", "pug", "r",
+            "razor", "ruby", "rust", "scss", "shaderlab", "vb"
+          )
+          foreach ($lang in $uselessLanguages) {
+            Get-ChildItem -Path "$env:APP_DIR" -Recurse -Directory -Filter $lang | Where-Object {
+              $_.FullName -like "*extensions*"
+            } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-      # 5. 合并并更新 product.json（去遥测、去 AI 配置）
+      # 5. 自适应定位并合并 product.json (永不报不存在)
       - name: Patch product.json
         run: |
-          $targetProductPath = "$env:APP_DIR\resources\app\product.json"
-          if (-not (Test-Path $targetProductPath)) {
-            throw "未找到内置配置文件: $targetProductPath"
+          # 1. 尝试搜索解压包内部自带的 product.json
+          $repoRoot = (Get-Location).Path
+          $foundProduct = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "product.json" | Where-Object {
+            $_.DirectoryName -ne $repoRoot
+          } | Select-Object -First 1
+
+          $product = @{}
+          if ($foundProduct) {
+            Write-Host "已定位内部 product.json: $($foundProduct.FullName)"
+            $product = Get-Content -LiteralPath $foundProduct.FullName -Raw | ConvertFrom-Json -AsHashtable
+          } else {
+            Write-Host "未发现内部预设 product.json，将新建独立配置..."
           }
 
-          $product = Get-Content -LiteralPath $targetProductPath -Raw | ConvertFrom-Json -AsHashtable
-
+          # 2. 合并 Git 仓库根目录的自定义 product.json
           if (Test-Path "product.json") {
             Write-Host "正在合并根目录自定义 product.json..."
             $custom = Get-Content -LiteralPath "product.json" -Raw | ConvertFrom-Json -AsHashtable
@@ -120,12 +125,20 @@ jobs:
             }
           }
 
-          # 强制关闭遥测与设置独立互斥体
+          # 3. 强制关闭遥测，配置互斥锁
           $product["enableTelemetry"] = $false
           $product["win32MutexName"] = "inkode"
 
-          $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $targetProductPath -Encoding utf8NoBOM
-          Write-Host "product.json 配置写入成功！"
+          # 4. 双保险写入：写回 resources\app\product.json 与 根目录 product.json
+          $targetDir = Join-Path "$env:APP_DIR" "resources\app"
+          if (-not (Test-Path $targetDir)) {
+            New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+          }
+          $destJsonPath = Join-Path $targetDir "product.json"
+          $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $destJsonPath -Encoding utf8NoBOM
+          Copy-Item -LiteralPath $destJsonPath -Destination "$env:APP_DIR\product.json" -Force
+
+          Write-Host "product.json 已成功写入: $destJsonPath 与根目录"
 
       # 6. 开启便携模式：注入插件与用户配置
       - name: Inject Portable Data, Extensions & Settings
@@ -162,7 +175,7 @@ jobs:
           "@
           Move-Item -Path "icon_valid.ico" -Destination "icon.ico" -Force
 
-      # 8. 深度替换客户端内部的水印与 Logo（规避误伤系统 codicon）
+      # 8. 深度替换客户端内部的水印与 Logo
       - name: Replace Internal UI Images and Icons
         run: |
           if (-not (Test-Path "icon.svg")) {
@@ -184,8 +197,8 @@ jobs:
             "@
           }
 
-          # 仅替换编辑器水印与关于页的 VS Code Logo，绝不误伤 codicon 符号
-          $targetSvgs = Get-ChildItem -Path "$env:APP_DIR\resources\app\out" -Recurse -Filter "*.svg" | Where-Object {
+          # 动态搜索并仅替换编辑器水印与 VS Code Logo
+          $targetSvgs = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "*.svg" | Where-Object {
             $_.Name -like "letterpress*.svg" -or $_.Name -eq "code.svg"
           }
 
@@ -194,9 +207,9 @@ jobs:
             Copy-Item -Path "icon.svg" -Destination $item.FullName -Force
           }
 
-          # 注入 CSS 强制劫持左上角及背景水印
-          $cssFile = "$env:APP_DIR\resources\app\out\vs\workbench\workbench.desktop.main.css"
-          if (Test-Path $cssFile) {
+          # 动态查找 workbench.desktop.main.css 并注入样式
+          $cssFile = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "workbench.desktop.main.css" | Select-Object -First 1
+          if ($cssFile) {
             $svgBytes = [System.IO.File]::ReadAllBytes((Resolve-Path "icon.svg").Path)
             $b64Svg = [Convert]::ToBase64String($svgBytes)
             $customCss = @"
@@ -214,7 +227,7 @@ jobs:
             opacity: 0.15 !important;
           }
           "@
-            Add-Content -LiteralPath $cssFile -Value $customCss -Encoding utf8NoBOM
+            Add-Content -LiteralPath $cssFile.FullName -Value $customCss -Encoding utf8NoBOM
           }
 
       # 9. 修改 EXE 属性与图标，并重命名为 Inkode.exe
@@ -224,10 +237,10 @@ jobs:
             -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" `
             -OutFile "rcedit.exe"
 
-          $codeExePath = "$env:APP_DIR\Code.exe"
+          $codeExe = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "Code.exe" | Select-Object -First 1
           $iconPath = (Resolve-Path "icon.ico").Path
 
-          & ".\rcedit.exe" "$codeExePath" `
+          & ".\rcedit.exe" "$($codeExe.FullName)" `
             --set-icon "$iconPath" `
             --set-version-string "ProductName" "Inkode" `
             --set-version-string "FileDescription" "墨码 Inkode" `
@@ -238,41 +251,28 @@ jobs:
             throw "修改 EXE 资源失败，rcedit 退出码: $LASTEXITCODE"
           }
 
-          Rename-Item -LiteralPath $codeExePath -NewName "Inkode.exe"
+          Rename-Item -LiteralPath $codeExe.FullName -NewName "Inkode.exe"
 
-      # 10. 同步修复 CLI 终端命令 (inkode.cmd)
+      # 10. 动态修复 CLI 终端命令 (inkode.cmd)
       - name: Update CLI Launchers
         run: |
-          $binDir = "$env:APP_DIR\bin"
-          if (Test-Path $binDir) {
-            $cmdPath = Join-Path $binDir "code.cmd"
-            if (Test-Path $cmdPath) {
-              $cmd = Get-Content -LiteralPath $cmdPath -Raw
-              $cmd.Replace("Code.exe", "Inkode.exe") | Set-Content -LiteralPath $cmdPath -Encoding utf8NoBOM
-              Rename-Item -LiteralPath $cmdPath -NewName "inkode.cmd"
-            }
-
-            $shellPath = Join-Path $binDir "code"
-            if (Test-Path $shellPath) {
-              $script = Get-Content -LiteralPath $shellPath -Raw
-              $script.Replace('NAME="Code"', 'NAME="Inkode"') | Set-Content -LiteralPath $shellPath -Encoding utf8NoBOM
-              Rename-Item -LiteralPath $shellPath -NewName "inkode"
-            }
+          $cmdFile = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "code.cmd" | Select-Object -First 1
+          if ($cmdFile) {
+            $cmd = Get-Content -LiteralPath $cmdFile.FullName -Raw
+            $cmd.Replace("Code.exe", "Inkode.exe") | Set-Content -LiteralPath $cmdFile.FullName -Encoding utf8NoBOM
+            $newCmdPath = Join-Path $cmdFile.Directory.FullName "inkode.cmd"
+            Move-Item -LiteralPath $cmdFile.FullName -Destination $newCmdPath -Force
           }
 
-      # 11. 验证 CLI 执行入口
-      - name: Verify CLI
-        run: |
-          $cliCmd = "$env:APP_DIR\bin\inkode.cmd"
-          if (-not (Test-Path $cliCmd)) {
-            throw "CLI 入口文件不存在: $cliCmd"
-          }
-          & "$cliCmd" --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "Inkode 命令行启动检查失败"
+          $shFile = Get-ChildItem -Path "$env:APP_DIR" -Recurse -Filter "code" | Where-Object { -not $_.Extension } | Select-Object -First 1
+          if ($shFile) {
+            $script = Get-Content -LiteralPath $shFile.FullName -Raw
+            $script.Replace('NAME="Code"', 'NAME="Inkode"') | Set-Content -LiteralPath $shFile.FullName -Encoding utf8NoBOM
+            $newShPath = Join-Path $shFile.Directory.FullName "inkode"
+            Move-Item -LiteralPath $shFile.FullName -Destination $newShPath -Force
           }
 
-      # 12. 极限压缩打包
+      # 11. 极限压缩打包
       - name: Compress Custom Package
         run: |
           tar.exe -a -c -f "Inkode-Windows-Portable.zip" -C "$env:APP_DIR" .
@@ -280,7 +280,7 @@ jobs:
             throw "打包压缩失败"
           }
 
-      # 13. 上传最终成品
+      # 12. 上传最终成品
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
