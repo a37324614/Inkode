@@ -44,55 +44,45 @@ jobs:
             -Path "vscode.zip" `
             -DestinationPath $env:PACKAGE_DIR
 
-      # 3. 动态定位并合并定制 product.json
+      # 3. 【核心去除 AI】物理删除官方内置的 AI、Copilot、遥测扩展
+      - name: Purge Built-in AI Extensions
+        run: |
+          $builtinExtDir = "$env:PACKAGE_DIR\resources\app\extensions"
+          Write-Host "正在扫描并清理内置 AI 模块..."
+          $aiExtensions = Get-ChildItem -Path $builtinExtDir -Directory | Where-Object { 
+            $_.Name -like "*copilot*" -or $_.Name -like "*chat*"
+          }
+          foreach ($ext in $aiExtensions) {
+            Write-Host "移除: $($ext.Name)"
+            Remove-Item -LiteralPath $ext.FullName -Recurse -Force
+          }
+
+      # 4. 定位并合并定制 product.json (去遥测与修改品牌)
       - name: Patch product.json
         run: |
-          # 自动在解压目录中查找内置的 product.json
           $productFile = Get-ChildItem -Path $env:PACKAGE_DIR -Recurse -Filter "product.json" | Select-Object -First 1
           if (-not $productFile) {
             throw "在 $env:PACKAGE_DIR 下未找到任何 product.json！"
           }
           $targetProductPath = $productFile.FullName
-          Write-Host "已定位内部配置文件: $targetProductPath"
 
-          # 读取解压包自带的配置
           $product = Get-Content -LiteralPath $targetProductPath -Raw | ConvertFrom-Json -AsHashtable
 
-          # 合并仓库根目录你的自定义配置
           if (Test-Path "product.json") {
-            Write-Host "正在合并根目录自定义 product.json..."
             $custom = Get-Content -LiteralPath "product.json" -Raw | ConvertFrom-Json -AsHashtable
             foreach ($key in $custom.Keys) {
               $product[$key] = $custom[$key]
             }
           }
 
-          # 注入独立互斥锁名称（防止与系统原生 VS Code 产生实例冲突）
+          # 强制关闭遥测与设置独立互斥体
+          $product["enableTelemetry"] = $false
           $product["win32MutexName"] = "inkode"
 
-          # 保存写回
           $product | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $targetProductPath -Encoding utf8NoBOM
-          Write-Host "product.json 更新完成！"
-# 修复/转换合法标准 ICO 格式
-      - name: Validate and Fix ICO Format
-        run: |
-          python -m pip install --upgrade pillow
-          python -c @"
-          from PIL import Image
-          import sys
+          Write-Host "product.json 更新并净化完成！"
 
-          # 打开现有的 icon.ico (即便它是伪装成 .ico 的 png/jpg 也能正常读取)
-          img = Image.open('icon.ico')
-          img = img.convert('RGBA')
-
-          # 写入真正合法的 Windows ICO 多分辨率复合格式
-          sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
-          img.save('icon_valid.ico', format='ICO', sizes=sizes)
-          print('ICO converted successfully!')
-          "@
-          # 覆盖原图标文件
-          Move-Item -Path "icon_valid.ico" -Destination "icon.ico" -Force
-      # 4. 开启便携模式：注入插件与用户配置 (合并修正版)
+      # 5. 开启便携模式：注入插件与用户静音配置 (config/settings.json)
       - name: Inject Portable Data, Extensions & Settings
         run: |
           $dataDir = "$env:PACKAGE_DIR\data"
@@ -102,19 +92,30 @@ jobs:
           New-Item -ItemType Directory -Path $extDir -Force | Out-Null
           New-Item -ItemType Directory -Path $userDir -Force | Out-Null
 
-          # 拷贝提取的插件
           if (Test-Path -LiteralPath "extensions" -PathType Container) {
-            Write-Host "正在注入本地插件..."
             Copy-Item -Path "extensions\*" -Destination $extDir -Recurse -Force
           }
 
-          # 拷贝预设配置（如 config/settings.json, config/keybindings.json）
           if (Test-Path -LiteralPath "config" -PathType Container) {
-            Write-Host "正在注入用户配置..."
             Copy-Item -Path "config\*" -Destination $userDir -Recurse -Force
           }
 
-      # 5. 下载 rcedit 修改 EXE 图标与产品信息，并改名为 Inkode.exe
+      # 6. 自动修复 ICO 格式（确保 rcedit 100% 成功）
+      - name: Validate and Fix ICO Format
+        run: |
+          python -m pip install --upgrade pillow
+          python -c @"
+          from PIL import Image
+
+          img = Image.open('icon.ico')
+          img = img.convert('RGBA')
+          sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+          img.save('icon_valid.ico', format='ICO', sizes=sizes)
+          print('ICO 格式验证/生成成功！')
+          "@
+          Move-Item -Path "icon_valid.ico" -Destination "icon.ico" -Force
+
+      # 7. 修改 EXE 图标与产品信息，改名为 Inkode.exe
       - name: Patch Icon and Exe Name
         run: |
           Invoke-WebRequest `
@@ -136,7 +137,7 @@ jobs:
             -LiteralPath "$env:PACKAGE_DIR\Code.exe" `
             -NewName "Inkode.exe"
 
-      # 6. 同步更新命令行启动脚本
+      # 8. 同步更新命令行启动脚本
       - name: Update CLI Launchers
         run: |
           $binDir = "$env:PACKAGE_DIR\bin"
@@ -157,7 +158,7 @@ jobs:
             Rename-Item -LiteralPath $shellPath -NewName "inkode"
           }
 
-      # 7. 验证 CLI 状态
+      # 9. 验证 CLI 状态
       - name: Verify CLI
         run: |
           & ".\$env:PACKAGE_DIR\bin\inkode.cmd" --version
@@ -165,7 +166,7 @@ jobs:
             throw "Inkode 命令行启动检查失败"
           }
 
-      # 8. 使用系统自带 tar 打包，保留符号链接与隐藏文件
+      # 10. 使用系统自带 tar 打包
       - name: Compress Custom Package
         run: |
           tar.exe -a -c -f "Inkode-Windows-Portable.zip" `
@@ -175,7 +176,7 @@ jobs:
             throw "压缩失败"
           }
 
-      # 9. 上传产物
+      # 11. 上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
